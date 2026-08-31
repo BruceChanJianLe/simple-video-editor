@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "simple-video-editor"
+version = "0.1.0"
+description = "Annotate and assemble short videos - Flameshot, but for video"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = ["PySide6>=6.6"]
+
+[project.scripts]
+simple-video-editor = "sve.app:main"
+sve = "sve.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+filterwarnings = ["error::DeprecationWarning:sve.*"]
+
+[tool.ruff]
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF"]
+ignore = [
+  "E501",    # long lines are reported by the formatter, not worth failing on
+  "B008",    # Qt APIs legitimately take constructed defaults
+  "SIM108",  # ternaries are not always clearer than an if/else
+]
