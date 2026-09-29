@@ -55,12 +55,16 @@ def test_render_is_resolution_independent(shape):
     large = ink_bbox(render_to_image([shape], QSize(1280, 720)))
     assert small is not None and large is not None
 
-    # One low-res pixel is 1/320 of the frame; allow a shade over that.
-    tol = 2.0 / 320
-    assert small.x() == pytest.approx(large.x(), abs=tol)
-    assert small.y() == pytest.approx(large.y(), abs=tol)
-    assert small.width() == pytest.approx(large.width(), abs=tol)
-    assert small.height() == pytest.approx(large.height(), abs=tol)
+    # The fractions quantize to the low-res pixel grid, and one low-res pixel
+    # is 1/320 of the frame *width* but 1/180 of its *height* - so the
+    # tolerance is per axis. Two pixels of slack, because glyph rasterizers
+    # legitimately differ by a pixel (FreeType on Linux vs CoreText on macOS).
+    tol_x = 2.0 / 320
+    tol_y = 2.0 / 180
+    assert small.x() == pytest.approx(large.x(), abs=tol_x)
+    assert small.y() == pytest.approx(large.y(), abs=tol_y)
+    assert small.width() == pytest.approx(large.width(), abs=tol_x)
+    assert small.height() == pytest.approx(large.height(), abs=tol_y)
 
 
 @pytest.mark.parametrize("shape", SHAPES, ids=lambda s: s.type)

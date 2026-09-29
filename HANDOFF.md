@@ -3,6 +3,45 @@
 Everything below was built and verified on **Linux**. The macOS path is
 unverified. This file is the checklist for closing that gap.
 
+## 0. macOS verification results (2026-08-31)
+
+Verified on an Apple Silicon Mac (macOS 26.6, aarch64-darwin, Retina display
+at devicePixelRatio 2.0). Everything in sections 3 and 4 now works; section 5
+(the distributable .app) remains unexecuted. Two changes were needed:
+
+1. **nixpkgs pin bumped** (`a7fc11be66bd` → `0921fdb3e13e`, the
+   nixpkgs-25.11-darwin channel). The old pin had no aarch64-darwin binary
+   cache for pyside6, and building it from source failed: its qtconnectivity
+   6.10.0 does not compile on darwin (nixpkgs' pcsclite headers are not on the
+   include path), which blocked `nix develop`, `nix run` and `nix build`
+   outright. The new pin ships the same stack (Qt 6.10.2, PySide6 6.10.0,
+   ffmpeg 7.1.2, Python 3.12.13) with darwin binaries cached.
+2. **`test_render_is_resolution_independent` tolerance made per-axis.** The
+   text case failed by one pixel: the tolerance was written as 2/320 of the
+   frame and applied to the height fraction too, where one low-res pixel is
+   1/180. CoreText rounds a 22px "Hello" one pixel taller than FreeType does;
+   the renderer itself is fine (the export-matches-preview gate passes).
+
+Findings against the risk list in section 4:
+
+- **4.1 resolved, and the premise was off**: Qt Multimedia defaults to the
+  *ffmpeg* backend on macOS too (Qt 6.5+), so the AVFoundation risk does not
+  apply to the Nix-run app. Video presents while paused, plays, and the
+  scrubber tracks position, verified against real Reolink h264 footage.
+- **4.2 resolved**: all 32 alignment tests pass, and corner shapes visually
+  hug the picture, not the widget, at DPR 2.0.
+- **4.3 resolved**: `nix flake check` passes on aarch64-darwin (evaluation
+  only; note it skips builds, which is why it could not catch the pyside6
+  build failure above).
+- **4.4 confirmed**: the suite runs headless without with-xvfb.sh;
+  168 tests pass, ruff clean.
+
+Also verified end to end: a two-clip project from real camera footage with
+trims and source-time shapes exported via the packaged `sve export`; output
+duration, shape timing windows, clip boundaries and audio all correct.
+x86_64-darwin was not tested (no Intel Mac available), and Linux should be
+re-verified once against the new pin.
+
 ## 1. What this is
 
 A cross-platform desktop app for annotating and assembling short videos:
@@ -17,7 +56,8 @@ clips and stills, exported to one mp4 via ffmpeg.
 
 Stack: Python 3.12, PySide6 (Qt 6.10), `QMediaPlayer` + `QGraphicsVideoItem`
 for preview, `QPainter` for shapes, bundled ffmpeg 7.1 (GPL, libx264) as a
-subprocess. All pinned by `flake.lock` (nixpkgs `a7fc11be66bd`).
+subprocess. All pinned by `flake.lock` (nixpkgs `0921fdb3e13e`,
+nixpkgs-25.11-darwin; see section 0 for why the original pin moved).
 
 ## 2. Verified on Linux
 

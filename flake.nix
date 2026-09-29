@@ -2,7 +2,13 @@
   description = "Simple Video Editor - annotate and assemble short videos";
 
   inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/a7fc11be66bdfb5cdde611ee5ce381c183da8386";
+    # nixpkgs-25.11-darwin as of 2026-08-31. The previous pin
+    # (a7fc11be66bd) had no aarch64-darwin binary cache for pyside6 and its
+    # qtconnectivity 6.10.0 failed to compile on darwin (pcsclite headers not
+    # on the include path), which broke `nix develop`/`nix run` on macOS.
+    # This commit ships the same stack (Qt 6.10, PySide6 6.10.0, ffmpeg 7.1,
+    # Python 3.12) with darwin binaries cached.
+    nixpkgs.url = "github:NixOS/nixpkgs/0921fdb3e13e40fe25fbc52b89661a9d6d32ac68";
     flake-utils.url = "github:numtide/flake-utils";
   };
 
