@@ -14,10 +14,11 @@ before concatenation, would gate them on each clip's local time and put every
 annotation after the first clip at the wrong moment.
 
 **Time conversion.** ``Shape.start``/``end`` are in their source file's
-timebase - the same clock as ``in_point``. The global time at which a shape
-appears is therefore::
+timebase - the same clock as ``in_point``. A clip's speed compresses or
+stretches that span onto the output timeline, so the global time at which a
+shape appears is::
 
-    global = clip_offset + (shape.start - clip.in_point)
+    global = clip_offset + (shape.start - clip.in_point) / clip.speed
 
 which is also the only place in the codebase that conversion happens.
 """
@@ -34,7 +35,7 @@ from PySide6.QtCore import QSize
 
 from .ffmpeg_run import Cancelled, CancelToken, run_ffmpeg
 from .geometry import even
-from .model import Clip, Project, Shape
+from .model import Clip, Project, Shape, clamp_speed
 from .normalize import normalize_clip, normalized_path
 from .render import render_to_image
 
@@ -110,12 +111,33 @@ def global_range(project: Project, clip: Clip, shape: Shape) -> tuple[float, flo
     """Map a shape's source-time range onto the output timeline.
 
     Clamped to the clip's trimmed span: a shape whose range extends past the
-    out point must not bleed onto the next clip.
+    out point must not bleed onto the next clip. Speed - the clip's base rate
+    and any speed sections - retimes the span through
+    :meth:`Clip.output_time`, so a shape over sped-up content is shown for
+    proportionally less output time; it stays attached to the same source
+    frames.
     """
     offset = project.clip_offset(clip.id)
-    start = offset + (max(shape.start, clip.in_point) - clip.in_point)
-    end = offset + (min(shape.end, clip.out_point) - clip.in_point)
-    return start, end
+    return offset + clip.output_time(shape.start), offset + clip.output_time(shape.end)
+
+
+def atempo_chain(speed: float) -> str:
+    """``atempo`` filters multiplying to ``speed``, each within [0.5, 2.0].
+
+    ``atempo`` rejects factors outside that range, so 0.25x is expressed as
+    two 0.5x stages. Within SPEED_MIN..SPEED_MAX the chain is at most two
+    filters long.
+    """
+    factors: list[float] = []
+    remaining = clamp_speed(speed)
+    while remaining > 2.0:
+        factors.append(2.0)
+        remaining /= 2.0
+    while remaining < 0.5:
+        factors.append(0.5)
+        remaining /= 0.5
+    factors.append(remaining)
+    return ",".join(f"atempo={f:.6f}" for f in factors)
 
 
 def visible_shapes_for(clip: Clip) -> list[Shape]:
@@ -208,19 +230,49 @@ def build_plan(
             )
         else:
             plan.inputs.append(["-i", str(source)])
-            graph.append(
-                f"[{index}:v]trim=start={clip.in_point:.6f}:end={clip.out_point:.6f},"
-                f"setpts=PTS-STARTPTS,fps={spec.fps},format=yuv420p,setsar=1[v{index}]"
-            )
-            graph.append(
-                f"[{index}:a]atrim=start={clip.in_point:.6f}:end={clip.out_point:.6f},"
-                f"asetpts=PTS-STARTPTS,aformat=sample_fmts=fltp:"
-                f"sample_rates={spec.sample_rate}:channel_layouts=stereo[a{index}]"
-            )
+            # One concat entry per constant-speed piece of the clip. A clip
+            # without speed sections is one piece, and its chain is exactly
+            # the graph this exporter always produced. With sections the input
+            # is split (one decode, several branches) and each piece is
+            # trimmed and retimed on its own.
+            pieces = clip.speed_segments()
+            if not pieces:  # zero-length trim; preserved as an empty chain
+                pieces = [(clip.in_point, clip.out_point, clamp_speed(clip.speed))]
+            if len(pieces) > 1:
+                v_heads = [f"v{index}p{k}" for k in range(len(pieces))]
+                a_heads = [f"a{index}p{k}" for k in range(len(pieces))]
+                graph.append(f"[{index}:v]split={len(pieces)}"
+                             + "".join(f"[{h}]" for h in v_heads))
+                graph.append(f"[{index}:a]asplit={len(pieces)}"
+                             + "".join(f"[{h}]" for h in a_heads))
+            else:
+                v_heads = [f"{index}:v"]
+                a_heads = [f"{index}:a"]
+            for k, (seg_in, seg_out, speed) in enumerate(pieces):
+                label = str(index) if len(pieces) == 1 else f"{index}s{k}"
+                # Retiming happens *before* the fps filter, so slow motion
+                # gets frames duplicated and speed-up gets frames dropped
+                # against the project's constant output rate. Audio is retimed
+                # with atempo, which resamples without shifting pitch, keeping
+                # it in sync with the video by construction.
+                setpts = "PTS-STARTPTS" if speed == 1.0 else f"(PTS-STARTPTS)/{speed:.6f}"
+                tempo = "" if speed == 1.0 else f"{atempo_chain(speed)},"
+                graph.append(
+                    f"[{v_heads[k]}]trim=start={seg_in:.6f}:end={seg_out:.6f},"
+                    f"setpts={setpts},fps={spec.fps},format=yuv420p,setsar=1[v{label}]"
+                )
+                graph.append(
+                    f"[{a_heads[k]}]atrim=start={seg_in:.6f}:end={seg_out:.6f},"
+                    f"asetpts=PTS-STARTPTS,{tempo}aformat=sample_fmts=fltp:"
+                    f"sample_rates={spec.sample_rate}:channel_layouts=stereo[a{label}]"
+                )
+                segments.append(f"[v{label}][a{label}]")
+            continue
         segments.append(f"[v{index}][a{index}]")
 
-    count = len(project.clips)
+    count = len(segments)
     if count == 1:
+        # A single segment is always labelled [v0][a0]: one clip, one piece.
         graph.append("[v0]null[base]")
         graph.append("[a0]anull[aout]")
     else:
@@ -352,6 +404,7 @@ __all__ = [
     "EncodeSettings",
     "ExportPlan",
     "TimedOverlay",
+    "atempo_chain",
     "build_plan",
     "export_project",
     "global_range",

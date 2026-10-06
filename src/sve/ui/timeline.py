@@ -24,7 +24,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ..model import Clip
+from ..model import SPEED_MAX, SPEED_MIN, Clip, clamp_speed
 from ..thumbnails import THUMB_HEIGHT, THUMB_WIDTH, ThumbnailLoader
 from .state import EditorState
 
@@ -104,12 +104,26 @@ class TimelinePanel(QWidget):
         self.set_out_button = QPushButton("Set out to playhead")
         self.set_out_button.clicked.connect(lambda: self._set_from_playhead("out_point"))
 
+        self.speed_spin = QDoubleSpinBox()
+        self.speed_spin.setDecimals(2)
+        self.speed_spin.setRange(SPEED_MIN, SPEED_MAX)
+        self.speed_spin.setSingleStep(0.25)
+        self.speed_spin.setValue(1.0)
+        self.speed_spin.setSuffix(" x")
+        self.speed_spin.setToolTip(
+            "Playback rate for this clip: 2 x plays it twice as fast, 0.5 x half"
+            " as fast. Audio keeps its pitch. Annotations stay on the frames"
+            " they mark."
+        )
+        self.speed_spin.valueChanged.connect(self._set_speed)
+
         self.duration_label = QLabel("-")
 
         form.addRow("In", self.in_spin)
         form.addRow("Out", self.out_spin)
         form.addRow("", self.set_in_button)
         form.addRow("", self.set_out_button)
+        form.addRow("Speed", self.speed_spin)
         form.addRow("Duration", self.duration_label)
         box.setEnabled(False)
         return box
@@ -129,6 +143,7 @@ class TimelinePanel(QWidget):
                 f"{clip.info.width}x{clip.info.height}"
                 + (f" @ {clip.info.fps:.2f}fps" if clip.kind == "video" else " (still)")
                 + f"\nin {clip.in_point:.3f}s  out {clip.out_point:.3f}s"
+                + (f"  speed {clip.speed:g}x" if clip.speed != 1.0 else "")
             )
             self.list.addItem(item)
             # Re-apply a thumbnail we already have: the list is cleared on
@@ -147,6 +162,11 @@ class TimelinePanel(QWidget):
     def _label_for(index: int, clip: Clip) -> str:
         shapes = len(clip.shapes)
         suffix = f", {shapes} shape{'s' if shapes != 1 else ''}" if shapes else ""
+        sections = len(clip.speed_sections)
+        if sections:
+            suffix = f", {sections} speed section{'s' if sections != 1 else ''}{suffix}"
+        if clip.speed != 1.0:
+            suffix = f" @ {clip.speed:g}x{suffix}"
         return f"{index + 1}. {clip.name}\n{clip.duration:.2f}s{suffix}"
 
     def _update_total(self) -> None:
@@ -232,6 +252,16 @@ class TimelinePanel(QWidget):
                 clip.out_point = value
         self._sync_trim_controls()
 
+    def _set_speed(self, value: float) -> None:
+        if self._rebuilding:
+            return
+        clip = self.state.current_clip
+        if clip is None or clip.kind != "video" or abs(clip.speed - value) < 1e-6:
+            return
+        with self.state.document.edit("Change clip speed"):
+            clip.speed = clamp_speed(value)
+        self._sync_trim_controls()
+
     def _set_from_playhead(self, field: str) -> None:
         self._sync_spin(field, self.state.playhead)
 
@@ -258,8 +288,12 @@ class TimelinePanel(QWidget):
         self.out_spin.setMaximum(max(0.0, upper))
         self.in_spin.setValue(clip.in_point)
         self.out_spin.setValue(clip.out_point)
-        # A still has no internal timeline; only its duration is meaningful.
+        self.speed_spin.setValue(clip.speed)
+        # A still has no internal timeline; only its duration is meaningful,
+        # and a rate on a static picture would just be a confusing second way
+        # to set that duration.
         self.in_spin.setEnabled(not is_image)
+        self.speed_spin.setEnabled(not is_image)
         self.trim_box.setTitle("Image duration" if is_image else "Clip trim")
         self._rebuilding = False
 

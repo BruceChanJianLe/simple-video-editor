@@ -47,9 +47,50 @@ DEFAULT_STROKE_COLOR = "#ff3b30ff"
 DEFAULT_FILL_COLOR = "#00000000"
 DEFAULT_TEXT_COLOR = "#ff3b30ff"
 
+# Playback-rate bounds for a clip. The floor keeps the atempo chain at two
+# stages (atempo accepts 0.5-2.0 per instance for clean pitch handling); the
+# ceiling is where 15-30fps sources stop having enough frames to look like
+# motion rather than a slideshow.
+SPEED_MIN = 0.25
+SPEED_MAX = 4.0
+
+
+def clamp_speed(value: float) -> float:
+    if not value > 0:  # also catches NaN
+        return 1.0
+    return min(max(value, SPEED_MIN), SPEED_MAX)
+
 
 def new_id() -> str:
     return uuid.uuid4().hex[:12]
+
+
+@dataclass
+class SpeedSection:
+    """A span of a clip's *source* time that plays at its own rate.
+
+    ``start``/``end`` are in the source file's timebase, the same clock as
+    ``Clip.in_point`` and ``Shape.start`` - not offsets, not output time - so
+    retrimming the clip cannot move a section off the content it retimes.
+    Outside every section the clip plays at ``Clip.speed``.
+    """
+
+    start: float
+    end: float
+    speed: float = 1.0
+    id: str = field(default_factory=new_id)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"id": self.id, "start": self.start, "end": self.end, "speed": self.speed}
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> SpeedSection:
+        return cls(
+            id=d.get("id") or new_id(),
+            start=float(d.get("start", 0.0)),
+            end=float(d.get("end", 0.0)),
+            speed=clamp_speed(float(d.get("speed", 1.0))),
+        )
 
 
 @dataclass
@@ -166,13 +207,90 @@ class Clip:
     source_path: str
     in_point: float = 0.0
     out_point: float = 0.0
+    # Playback rate: 2.0 plays the trimmed span at double speed, 0.5 at half.
+    # Video only; an image clip's pace is just its duration, so it stays 1.0.
+    speed: float = 1.0
+    # Spans of source time that override ``speed``. Kept sorted by the UI but
+    # never trusted: :meth:`speed_segments` sorts and resolves overlaps.
+    speed_sections: list[SpeedSection] = field(default_factory=list)
     shapes: list[Shape] = field(default_factory=list)
     info: SourceInfo = field(default_factory=SourceInfo)
     id: str = field(default_factory=new_id)
 
     @property
-    def duration(self) -> float:
+    def source_span(self) -> float:
+        """Length of the trimmed span in *source* seconds, unaffected by speed."""
         return max(0.0, self.out_point - self.in_point)
+
+    def speed_segments(self) -> list[tuple[float, float, float]]:
+        """The trimmed span as ``(source_start, source_end, speed)`` pieces.
+
+        Contiguous, sorted, covering exactly [in_point, out_point]: sections
+        (intersected with the trim; earlier one wins an overlap) with the
+        clip's base speed filling the gaps. Every consumer of speed - the
+        duration, the two time mappings, the exporter, the preview's live rate
+        - derives from this one decomposition, so they cannot disagree.
+        """
+        base = clamp_speed(self.speed)
+        lo, hi = self.in_point, self.out_point
+        if hi - lo <= 0:
+            return []
+        pieces: list[tuple[float, float, float]] = []
+        cursor = lo
+        for section in sorted(self.speed_sections, key=lambda s: s.start):
+            start = max(section.start, cursor)
+            end = min(section.end, hi)
+            if end - start <= 1e-9:
+                continue
+            if start - cursor > 1e-9:
+                pieces.append((cursor, start, base))
+            pieces.append((start, end, clamp_speed(section.speed)))
+            cursor = end
+        if hi - cursor > 1e-9:
+            pieces.append((cursor, hi, base))
+        return pieces
+
+    @property
+    def duration(self) -> float:
+        """Length the clip occupies on the *output* timeline, in seconds."""
+        return sum((end - start) / speed for start, end, speed in self.speed_segments())
+
+    def output_time(self, source_t: float) -> float:
+        """Output seconds from the clip's start to source time ``source_t``.
+
+        0.0 at the in point, :attr:`duration` at the out point; values outside
+        the trim clamp to those ends.
+        """
+        t = min(max(source_t, self.in_point), self.out_point)
+        out = 0.0
+        for start, end, speed in self.speed_segments():
+            if t <= start:
+                break
+            out += (min(t, end) - start) / speed
+        return out
+
+    def source_at_output(self, output_t: float) -> float:
+        """Inverse of :meth:`output_time`: the source time ``output_t`` output
+        seconds into the clip, clamped to the trimmed span."""
+        remaining = max(0.0, output_t)
+        segments = self.speed_segments()
+        for start, end, speed in segments:
+            span = (end - start) / speed
+            if remaining <= span:
+                return start + remaining * speed
+            remaining -= span
+        return segments[-1][1] if segments else self.in_point
+
+    def rate_at(self, source_t: float) -> float:
+        """The playback rate in force at source time ``source_t``.
+
+        Half-open pieces, like shape visibility: at a boundary the next piece's
+        rate applies, so back-to-back sections never fight over one frame.
+        """
+        for start, end, speed in self.speed_segments():
+            if start <= source_t < end:
+                return speed
+        return clamp_speed(self.speed)
 
     @property
     def name(self) -> str:
@@ -185,6 +303,8 @@ class Clip:
             "source_path": self.source_path,
             "in_point": self.in_point,
             "out_point": self.out_point,
+            "speed": self.speed,
+            "speed_sections": [s.to_dict() for s in self.speed_sections],
             "shapes": [s.to_dict() for s in self.shapes],
             "info": self.info.to_dict(),
         }
@@ -197,6 +317,12 @@ class Clip:
             source_path=d["source_path"],
             in_point=float(d.get("in_point", 0.0)),
             out_point=float(d.get("out_point", 0.0)),
+            # Missing in pre-speed project files; images never carry a rate.
+            speed=1.0 if d["kind"] == "image" else clamp_speed(float(d.get("speed", 1.0))),
+            speed_sections=[] if d["kind"] == "image" else sorted(
+                (SpeedSection.from_dict(s) for s in d.get("speed_sections", [])),
+                key=lambda s: s.start,
+            ),
             shapes=[Shape.from_dict(s) for s in d.get("shapes", [])],
             info=SourceInfo.from_dict(d.get("info", {})),
         )
@@ -304,11 +430,15 @@ class Project:
 
 __all__ = [
     "PROJECT_VERSION",
+    "SPEED_MAX",
+    "SPEED_MIN",
     "Clip",
     "OutputSpec",
     "Project",
     "Shape",
     "SourceInfo",
+    "SpeedSection",
+    "clamp_speed",
     "new_id",
     "replace",
 ]

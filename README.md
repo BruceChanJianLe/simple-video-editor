@@ -18,7 +18,8 @@ video clips and still images.
   start time, then invisible at its end time. No fades, no keyframes, no
   motion.
 - **Timeline** - import video and stills, reorder by dragging, trim video clips
-  with in/out points, give stills a duration, delete clips.
+  with in/out points, speed a whole clip or marked sections of it up or down
+  (0.25x-4x, pitch-corrected audio), give stills a duration, delete clips.
 - **Export** - the whole timeline to one mp4 (H.264 + AAC, yuv420p), with a
   real progress bar and a working Cancel.
 - **Projects** - saved as readable JSON, with undo/redo.
@@ -169,14 +170,20 @@ xcrun stapler staple dist/Simple\ Video\ Editor.app
    resolution and frame rate; a still first leaves it at 1920x1080 @ 30fps.
 2. **Select a clip** in the timeline. The player shows one clip at a time -
    annotation is a per-clip activity.
-3. **Trim** with the in/out fields, or "Set in/out to playhead".
-4. **Draw** with a tool from the palette. New shapes start at the playhead and
+3. **Trim** with the in/out fields, or "Set in/out to playhead". **Speed** sets
+   the clip's playback rate (0.25x-4x); annotations stay on the frames they
+   mark, and the preview plays at the same rate the export will.
+4. **Speed up a section** in the "Speed sections" panel on the right: move the
+   playhead to where the change should start, "Add at playhead", set its end
+   ("Set end to playhead") and its rate. The rest of the clip keeps the clip's
+   own speed; playback changes pace live as it crosses the boundary.
+5. **Draw** with a tool from the palette. New shapes start at the playhead and
    run to the end of the clip; adjust in the properties panel or with "Set
    start/end to playhead".
-5. **Preview full timeline** (`Ctrl+Shift+P`) renders the real export pipeline
+6. **Preview full timeline** (`Ctrl+Shift+P`) renders the real export pipeline
    at half resolution and opens it, so what you see cannot disagree with what
    you will get.
-6. **Export** (`Ctrl+E`).
+7. **Export** (`Ctrl+E`).
 
 ### Keyboard
 

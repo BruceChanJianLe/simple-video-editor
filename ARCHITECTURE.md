@@ -129,11 +129,48 @@ compares it against `Shape.start`/`end` with no conversion at all.
 Conversion happens in exactly one place, `export.global_range`:
 
 ```
-global_start = clip_offset + (shape.start - clip.in_point)
+global_start = clip_offset + clip.output_time(shape.start)
 ```
 
-The payoff is that reordering clips or changing a trim point cannot
-desynchronise annotations: a shape stays attached to the content it annotates.
+The payoff is that reordering clips, changing a trim point or changing a speed
+cannot desynchronise annotations: a shape stays attached to the content it
+annotates.
+
+### Speed
+
+A video clip has a base playback rate (`Clip.speed`, 0.25x-4x) plus optional
+**speed sections** (`Clip.speed_sections`): spans of source time that play at
+their own rate while the rest of the clip plays at the base rate. Section
+times are source time, like shape times, and for the same reason - retrimming
+must not move a section off the content it retimes.
+
+Everything derives from one decomposition, `Clip.speed_segments()`: the
+trimmed span as contiguous `(source_start, source_end, speed)` pieces,
+sections first (intersected with the trim, earlier one winning an overlap),
+base speed filling the gaps. `Clip.duration` sums the pieces,
+`Clip.output_time` / `Clip.source_at_output` are the piecewise mapping and its
+inverse, and `Clip.rate_at` is the rate in force at a source instant
+(half-open pieces, like shape visibility). Because every consumer reads the
+same segments, the exporter, the preview and the annotation timing cannot
+disagree about where retimed content lands.
+
+Speed does not add a third clock. Shape times stay in source time, and the
+preview implements speed as `QMediaPlayer.setPlaybackRate` re-applied on every
+position update with `rate_at(playhead)` - the player's *position* still
+reports source time under any rate, so the overlay's no-conversion comparison
+and the out-point stop are untouched, and playback simply changes pace as it
+crosses a section boundary. The scrubber and time label run in *output* time
+through the piecewise mapping, matching the exported pacing.
+
+In the export each piece becomes one concat entry: video retimed with
+`setpts=(PTS-STARTPTS)/speed` before the `fps` filter (so slow motion
+duplicates frames and speed-up drops them against the constant output rate),
+audio with an `atempo` chain (factors kept inside atempo's 0.5-2.0 range),
+which changes tempo without shifting pitch. A clip with sections is `split`
+once into one branch per piece, so it still decodes once. A clip without
+sections at 1x produces the exact graph this exporter always produced.
+Retiming happens at assembly, after normalization, so the per-source cache
+stays valid across speed edits.
 
 > **Spec note.** The build prompt's data model comment said shape times were
 > "relative to this clip's in_point", but its export formula
@@ -159,7 +196,7 @@ which is the first step back toward a frame pipeline.
 One ffmpeg invocation, one encode pass, one filter graph:
 
 ```
-normalized clips → trim → concat → overlay shapes → encode
+normalized clips → trim → retime (speed) → concat → overlay shapes → encode
 ```
 
 Each shape is rasterized to a **full-frame** transparent PNG, so its position
@@ -261,6 +298,7 @@ Interactive gestures must produce one undo entry, not one per mouse-move:
 | `ui/preview.py` | Canvas, video/still items, transport controls |
 | `ui/timeline.py` | Clip list, reordering, trim controls |
 | `ui/inspector.py` | Tool palette and shape properties |
+| `ui/speed_sections.py` | Per-clip speed sections panel |
 | `ui/shape_list.py` | Shape table for the current clip |
 | `ui/export_dialog.py` | Threaded export with progress and cancel |
 | `ui/main_window.py` | Menus, layout, actions |
@@ -268,8 +306,10 @@ Interactive gestures must produce one undo entry, not one per mouse-move:
 ## Out of scope
 
 Screen recording, transitions, audio editing or mixing, multi-track timelines,
-colour correction, filters and effects, speed changes, GPU acceleration, proxy
-media, cloud anything, plugins.
+colour correction, filters and effects, GPU acceleration, proxy media, cloud
+anything, plugins.
 
 These are not "not yet". Several of them would require the frame pipeline this
-design exists to avoid.
+design exists to avoid. (Per-clip speed, formerly on this list, turned out not
+to: it is a pure retiming, expressible as `setpts`/`atempo` in the existing
+graph and `setPlaybackRate` in the preview - see "Speed" above.)

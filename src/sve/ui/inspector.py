@@ -27,6 +27,7 @@ from PySide6.QtWidgets import (
 
 from ..model import Shape
 from ..render import color, color_to_spec
+from .speed_sections import SpeedSectionsPanel
 from .state import TOOLS, EditorState
 
 TOOL_LABELS = {
@@ -80,18 +81,22 @@ class ColorButton(QPushButton):
 
 
 class InspectorPanel(QWidget):
-    """Tool palette above the selected shape's properties."""
+    """Tool palette above the selected shape's properties and the current
+    clip's speed sections."""
 
     def __init__(self, state: EditorState, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.state = state
         self._syncing = False
 
+        self.speed_sections = SpeedSectionsPanel(state)
+
         layout = QVBoxLayout(self)
         layout.setContentsMargins(6, 6, 6, 6)
         layout.setSpacing(8)
         layout.addWidget(self._build_tools())
         layout.addWidget(self._build_properties())
+        layout.addWidget(self.speed_sections)
         layout.addStretch(1)
 
         state.toolChanged.connect(self._sync_tool)

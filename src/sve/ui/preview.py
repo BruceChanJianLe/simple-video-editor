@@ -286,6 +286,7 @@ class PreviewPane(QWidget):
         if clip is None:
             self.player.stop()
             self.player.setSource(QUrl())
+            self._apply_playback_rate()
             self._loaded_path = None
             self.canvas.show_video()
             self._update_enabled()
@@ -295,6 +296,7 @@ class PreviewPane(QWidget):
         if clip.kind == "image":
             self.player.stop()
             self.player.setSource(QUrl())
+            self._apply_playback_rate()
             self._loaded_path = None
             if not self.canvas.show_still(clip.source_path):
                 self.state.status(f"Could not read image {clip.name}")
@@ -304,6 +306,7 @@ class PreviewPane(QWidget):
                 self._loaded_path = clip.source_path
                 self._needs_initial_seek = True
                 self.player.setSource(QUrl.fromLocalFile(clip.source_path))
+            self._apply_playback_rate()
             # Pause *after* the source is set. Pausing a player that has no
             # source leaves it in StoppedState, and a stopped player never
             # presents a frame - the preview stays black until you press play,
@@ -316,9 +319,26 @@ class PreviewPane(QWidget):
         self.canvas.refresh()
 
     def _on_project_changed(self) -> None:
-        # in/out points may have moved under us (undo, trim edit).
+        # in/out points or speed may have moved under us (undo, trim edit).
+        self._apply_playback_rate()
         self._update_labels()
         self.canvas.refresh()
+
+    def _apply_playback_rate(self) -> None:
+        """Match the player's rate to the speed in force at the playhead.
+
+        The player's *position* stays in source time regardless of rate, so
+        the overlay's source-time comparison and the out-point stop are
+        unaffected; only the wall-clock pace changes, same as the export.
+        Re-checked on every position update, which is what makes playback
+        change pace as it crosses a speed-section boundary.
+        """
+        clip = self._clip
+        rate = 1.0
+        if clip is not None and clip.kind == "video":
+            rate = clip.rate_at(self.state.playhead)
+        if abs(self.player.playbackRate() - rate) > 1e-9:
+            self.player.setPlaybackRate(rate)
 
     def _update_enabled(self) -> None:
         clip = self._clip
@@ -356,6 +376,7 @@ class PreviewPane(QWidget):
         self.state.set_playhead(seconds)
         if clip is not None and clip.kind == "video":
             self.player.setPosition(round(seconds * 1000))
+        self._apply_playback_rate()
         self._update_labels()
         self.canvas.refresh()
 
@@ -388,6 +409,7 @@ class PreviewPane(QWidget):
             seconds = clip.out_point
             self.player.setPosition(round(seconds * 1000))
         self.state.set_playhead(seconds)
+        self._apply_playback_rate()
         self._update_labels()
         self.canvas.refresh()
 
@@ -432,6 +454,7 @@ class PreviewPane(QWidget):
         if self._clip is None:
             return
         self.state.set_playhead(self.player.position() / 1000.0)
+        self._apply_playback_rate()
         self.canvas.refresh()
         self._update_labels()
 
@@ -453,21 +476,26 @@ class PreviewPane(QWidget):
         clip = self._clip
         if clip is None:
             return
-        span = max(clip.duration, 1e-6)
-        self.seek(clip.in_point + span * value / 1000.0)
+        # The slider is linear in *output* time, matching the time label and
+        # the exported pacing: with a 2x section in the middle, dragging at a
+        # constant rate crosses that content proportionally faster. The seek
+        # target it maps to is still a source position.
+        self.seek(clip.source_at_output(clip.duration * value / 1000.0))
 
     def _update_labels(self) -> None:
         clip = self._clip
         if clip is None:
             self.time_label.setText("0:00.00 / 0:00.00")
             return
-        relative = max(0.0, self.state.playhead - clip.in_point)
-        self.time_label.setText(f"{_fmt(relative)} / {_fmt(clip.duration)}")
+        # Displayed times are *output* seconds - what this clip contributes to
+        # the export - so a 10s span at 2x reads as 5s and counts up at 1s/s.
+        elapsed = clip.output_time(self.state.playhead)
+        duration = clip.duration
+        self.time_label.setText(f"{_fmt(elapsed)} / {_fmt(duration)}")
 
-        span = max(clip.duration, 1e-6)
         self._suppress_slider = True
         if not self._scrub_active:
-            self.slider.setValue(round(1000 * relative / span))
+            self.slider.setValue(round(1000 * elapsed / max(duration, 1e-6)))
         self._suppress_slider = False
 
     # -- keyboard ------------------------------------------------------------
